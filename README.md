@@ -1,5 +1,5 @@
-# sample-golang-alice-bone + net/context
-Sample thin API server with Alice + Bone + x/net/context
+# sample-golang-bone + net/context
+Sample thin API server with Bone + x/net/context
 
 
 ## Why created
