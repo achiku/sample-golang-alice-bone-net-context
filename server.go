@@ -33,18 +33,6 @@ func (h ContextHandlerFunc) ServeHTTPContext(ctx context.Context, rw http.Respon
 	h(ctx, rw, req)
 }
 
-func middleware(h ContextHandler) ContextHandler {
-	return ContextHandlerFunc(func(ctx context.Context, rw http.ResponseWriter, req *http.Request) {
-		ctx = newContextWithRequestID(ctx, req)
-		h.ServeHTTPContext(ctx, rw, req)
-	})
-}
-
-func handler(ctx context.Context, rw http.ResponseWriter, req *http.Request) {
-	reqId := requestIDFromContext(ctx)
-	fmt.Fprintf(rw, "Hello request ID: %s\n", reqId)
-}
-
 type ContextAdapter struct {
 	ctx     context.Context
 	handler ContextHandler
@@ -54,7 +42,23 @@ func (ca *ContextAdapter) ServeHTTP(rw http.ResponseWriter, req *http.Request) {
 	ca.handler.ServeHTTPContext(ca.ctx, rw, req)
 }
 
-func loggingHandler(next http.Handler) http.Handler {
+func middleware(h ContextHandler) ContextHandler {
+	return ContextHandlerFunc(func(ctx context.Context, rw http.ResponseWriter, req *http.Request) {
+		ctx = newContextWithRequestID(ctx, req)
+		h.ServeHTTPContext(ctx, rw, req)
+	})
+}
+
+func contextMiddleware(ctx context.Context, next http.Handler) http.Handler {
+	fn := func(rw http.ResponseWriter, req *http.Request) {
+		ctx = newContextWithRequestID(ctx, req)
+		next.ServeHTTP(rw, req)
+		log.Printf("[%s]\n", ctx)
+	}
+	return http.HandlerFunc(fn)
+}
+
+func loggingMiddleware(next http.Handler) http.Handler {
 	fn := func(w http.ResponseWriter, r *http.Request) {
 		t1 := time.Now()
 		next.ServeHTTP(w, r)
@@ -64,7 +68,7 @@ func loggingHandler(next http.Handler) http.Handler {
 	return http.HandlerFunc(fn)
 }
 
-func recoverHandler(next http.Handler) http.Handler {
+func recoverMiddleware(next http.Handler) http.Handler {
 	fn := func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if err := recover(); err != nil {
@@ -77,19 +81,43 @@ func recoverHandler(next http.Handler) http.Handler {
 	return http.HandlerFunc(fn)
 }
 
-func account(rw http.ResponseWriter, req *http.Request) {
+func account(ctx context.Context, rw http.ResponseWriter, req *http.Request) {
 	accountId := bone.GetValue(req, "id")
-	fmt.Fprintf(rw, "accountId: %s", accountId)
+	reqId := requestIDFromContext(ctx)
+	fmt.Fprintf(rw, "accountId: %s, Request-ID: %s", accountId, reqId)
 }
 
-func note(rw http.ResponseWriter, req *http.Request) {
+func note(ctx context.Context, rw http.ResponseWriter, req *http.Request) {
 	noteId := bone.GetValue(req, "id")
-	fmt.Fprintf(rw, "noteId: %s", noteId)
+	reqId := requestIDFromContext(ctx)
+	fmt.Fprintf(rw, "noteId: %s, Request-ID: %s", noteId, reqId)
+}
+
+func simple(rw http.ResponseWriter, req *http.Request) {
+	fmt.Fprintf(rw, "normal handler\n")
 }
 
 func main() {
 	mux := bone.New()
-	mux.Get("/account/:id", http.HandlerFunc(account))
-	mux.Get("/note/:id", http.HandlerFunc(note))
+	ctx := context.Background()
+	accountContextHandler := &ContextAdapter{
+		ctx:     ctx,
+		handler: middleware(ContextHandlerFunc(account)),
+	}
+	noteContextHandler := &ContextAdapter{
+		ctx:     ctx,
+		handler: middleware(ContextHandlerFunc(note)),
+	}
+	simpleHandler := http.HandlerFunc(simple)
+
+	commonHandlers := TackNew(
+		contextMiddleware,
+		Adapt(loggingMiddleware),
+		Adapt(recoverMiddleware),
+	)
+
+	mux.Get("/account/:id", commonHandlers.ThenHandlerFunc(accountContextHandler))
+	mux.Get("/note/:id", commonHandlers.ThenHandlerFunc((noteContextHandler)))
+	mux.Get("/simple", commonHandlers.ThenHandlerFunc(simpleHandler))
 	http.ListenAndServe(":8080", mux)
 }
